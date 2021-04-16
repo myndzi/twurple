@@ -47,6 +47,7 @@
   ],
   "scripts": {
     "build": "tsukuru",
-    "rebuild": "tsukuru --clean"
+    "rebuild": "tsukuru --clean",
+    "test": "jest"
   }
 }
