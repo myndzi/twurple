@@ -24,8 +24,9 @@ const unwrap = (at: AccessToken | null): AccessTokenArgs | null => {
 
 describe('RefreshableAuthProvider', () => {
 	// use consistent dates so that snapshot testing is consistent
-	beforeAll(() => {
+	beforeEach(() => {
 		MockDate.set(new Date('2021-04-15T00:00:00.000Z'));
+		refreshUserToken.mockReset();
 		getTokenInfo.mockReturnValue(
 			Promise.resolve(
 				new TokenInfo({
@@ -38,7 +39,7 @@ describe('RefreshableAuthProvider', () => {
 			)
 		);
 	});
-	afterAll(() => {
+	afterEach(() => {
 		MockDate.reset();
 	});
 	it('returns the expected values, does not attempt to refresh', async () => {
@@ -109,7 +110,6 @@ describe('RefreshableAuthProvider', () => {
 	`);
 	});
 
-	// failing test -- to be addressed in a separate pr
 	it('refreshes only once for concurrent calls', async () => {
 		refreshUserToken
 			.mockReturnValueOnce(
