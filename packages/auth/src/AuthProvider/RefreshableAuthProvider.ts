@@ -1,8 +1,11 @@
 import { Enumerable } from '@d-fischer/shared-utils';
 import { rtfm } from '@twurple/common';
-import type { AccessToken } from '../AccessToken';
-import { refreshUserToken } from '../helpers';
+import { AccessToken } from '../AccessToken';
+import { FatalProviderError } from '../Errors/FatalProviderError';
+import { AbstractProvider } from './AbstractProvider';
+import type { RefreshableCredentials, LoadableCredentials } from './AbstractProvider';
 import type { AuthProvider, AuthProviderTokenType } from './AuthProvider';
+import type { AccessTokenData } from '../AccessToken';
 
 /**
  * Configuration for the {@RefreshableAuthProvider}.
@@ -36,12 +39,14 @@ export interface RefreshConfig {
  * tokens, automatically refreshing the access token whenever necessary.
  */
 @rtfm<RefreshableAuthProvider>('auth', 'RefreshableAuthProvider', 'clientId')
-export class RefreshableAuthProvider implements AuthProvider {
+export class RefreshableAuthProvider extends AbstractProvider implements AuthProvider {
 	@Enumerable(false) private readonly _clientSecret: string;
 	@Enumerable(false) private _refreshToken: string;
 	private readonly _childProvider: AuthProvider;
 	private _initialExpiry?: Date | null;
 	private readonly _onRefresh?: (token: AccessToken) => void;
+
+	@Enumerable(false) private _lastKnownAccessToken?: AccessToken;
 
 	/**
 	 * Creates a new auth provider based on the given one that can automatically
@@ -51,11 +56,67 @@ export class RefreshableAuthProvider implements AuthProvider {
 	 * @param refreshConfig The information necessary to automatically refresh an access token.
 	 */
 	constructor(childProvider: AuthProvider, refreshConfig: RefreshConfig) {
+		super();
+
 		this._clientSecret = refreshConfig.clientSecret;
 		this._refreshToken = refreshConfig.refreshToken;
 		this._childProvider = childProvider;
 		this._initialExpiry = refreshConfig.expiry;
 		this._onRefresh = refreshConfig.onRefresh;
+	}
+
+	async saveCredentials({
+		// eslint-disable-next-line @typescript-eslint/naming-convention
+		accessToken: access_token,
+		// eslint-disable-next-line @typescript-eslint/naming-convention
+		refreshToken: refresh_token,
+		// eslint-disable-next-line @typescript-eslint/naming-convention
+		expiresIn: expires_in,
+		scopes: scope,
+		timestamp: obtainmentDate
+	}: RefreshableCredentials): Promise<void> {
+		const tokenData = new AccessToken(
+			{
+				access_token,
+				refresh_token,
+				expires_in,
+				scope
+			},
+			obtainmentDate
+		);
+		this.setAccessToken(tokenData);
+		this._refreshToken = tokenData.refreshToken;
+		this._initialExpiry = undefined;
+
+		if (this._onRefresh) {
+			this._onRefresh(tokenData);
+		}
+	}
+
+	async loadCredentials(): Promise<LoadableCredentials> {
+		// farming out the data fetching to the child...
+
+		const childToken = await this._childProvider.getAccessToken();
+		const accessToken = childToken?.accessToken;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/no-unsafe-member-access
+		const expiresIn = ((childToken as any)._data as AccessTokenData).expires_in;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/no-unsafe-member-access
+		const timestamp = (childToken as any)._obtainmentDate as Date;
+
+		if (typeof accessToken !== 'string') {
+			throw new FatalProviderError('Child provider returned a null accessToken');
+		}
+		return {
+			clientId: this._childProvider.clientId,
+			clientSecret: this._clientSecret,
+			accessToken,
+			refreshToken: this._refreshToken,
+			expiryDate: this._initialExpiry ?? undefined,
+			scopes: this._childProvider.currentScopes,
+			// we need these or we'll double-call getTokenInfo
+			expiresIn,
+			timestamp
+		};
 	}
 
 	/**
@@ -78,59 +139,88 @@ export class RefreshableAuthProvider implements AuthProvider {
 	 * @param scopes The requested scopes.
 	 */
 	async getAccessToken(scopes?: string | string[]): Promise<AccessToken | null> {
+		const fullCreds = await this.fetch();
+
 		if (typeof scopes === 'string') {
 			scopes = scopes.split(' ');
 		}
-		const oldToken = await this._childProvider.getAccessToken();
-		if (oldToken && scopes && scopes.some(scope => !this.currentScopes.includes(scope))) {
-			// requesting a new scope should be delegated down...
-			const newToken = await this._childProvider.getAccessToken(scopes);
-			// ...but if the token doesn't change, carry on
-			if (newToken !== oldToken) {
-				return newToken;
-			}
+
+		if (scopes?.some(scope => !fullCreds.scopes.includes(scope))) {
+			throw new Error('not yet implemented');
 		}
+		// const oldToken = fullCreds.accessToken;
+		// if (oldToken && scopes && scopes.some(scope => !this.currentScopes.includes(scope))) {
+		// 	// requesting a new scope should be delegated down...
+		// 	const newToken = await this._childProvider.getAccessToken(scopes);
+		// 	// ...but if the token doesn't change, carry on
+		// 	if (newToken !== oldToken) {
+		// 		return newToken;
+		// 	}
+		// }
 
 		// if we don't have a current token, we just pass this and refresh right away
-		if (oldToken) {
-			if (this._initialExpiry) {
-				const now = new Date();
-				if (now < this._initialExpiry) {
-					return oldToken;
-				}
-			} else if (!oldToken.isExpired) {
-				return oldToken;
-			}
-		}
+		// if (oldToken) {
+		// 	if (this._initialExpiry) {
+		// 		const now = new Date();
+		// 		if (now < this._initialExpiry) {
+		// 			return oldToken;
+		// 		}
+		// 	} else if (!oldToken.isExpired) {
+		// 		return oldToken;
+		// 	}
+		// }
 
-		const refreshedToken = await this.refresh();
+		// const refreshedToken = await this.refresh();
 
-		if (oldToken) {
-			return refreshedToken;
-		}
+		// if (oldToken) {
+		// 	return refreshedToken;
+		// }
 
-		// need to check again for scopes after refreshing, in case a refresh token was passed without an access token
-		return this._childProvider.getAccessToken(scopes);
+		// // need to check again for scopes after refreshing, in case a refresh token was passed without an access token
+		return new AccessToken({
+			access_token: fullCreds.accessToken,
+			// the constructor guarantees we have a value here, though the type doesn't...
+			refresh_token: (fullCreds as RefreshableCredentials).refreshToken,
+			expires_in: fullCreds.expiresIn,
+			scope: fullCreds.scopes
+		});
+
+		// return new AccessToken(
+		// 	{
+		// 		access_token: fullCreds.accessToken,
+		// 		refresh_token: fullCreds.refreshToken,
+		// 		expires_in: fullCreds.expiresIn,
+		// 		scope: fullCreds.scopes
+		// 	},
+		// 	fullCreds.timestamp
+		// );
 	}
 
 	/**
 	 * Force a refresh of the access token.
 	 */
 	async refresh(): Promise<AccessToken> {
-		const tokenData = await refreshUserToken(this.clientId, this._clientSecret, this._refreshToken);
-		this.setAccessToken(tokenData);
-		this._refreshToken = tokenData.refreshToken;
-		this._initialExpiry = undefined;
-
-		if (this._onRefresh) {
-			this._onRefresh(tokenData);
+		const accessToken = (this._lastKnownAccessToken ?? (await this._childProvider.getAccessToken()))?.accessToken;
+		if (!accessToken) {
+			throw new FatalProviderError('No available access token to refresh');
 		}
 
-		return tokenData;
+		const fullCreds = await AbstractProvider.prototype.idempotentRefresh.call(this, accessToken);
+
+		return new AccessToken(
+			{
+				access_token: fullCreds.accessToken,
+				refresh_token: fullCreds.refreshToken,
+				expires_in: fullCreds.expiresIn,
+				scope: fullCreds.scopes
+			},
+			fullCreds.timestamp
+		);
 	}
 
 	/** @private */
 	setAccessToken(token: AccessToken): void {
+		this._lastKnownAccessToken = token;
 		this._childProvider.setAccessToken(token);
 	}
 

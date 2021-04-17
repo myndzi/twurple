@@ -59,4 +59,13 @@ export interface AuthProvider {
 	 * again at just any time.
 	 */
 	refresh?: () => Promise<AccessToken | null>;
+
+	/**
+	 * Loads initial data from a possibly-asynchronous data source.
+	 *
+	 * All methods will wait until this method initially resolves. It can be
+	 * used to fetch data from a file, database, or the network before any
+	 * API calls are made
+	 */
+	load?: () => Promise<AccessToken | null>;
 }

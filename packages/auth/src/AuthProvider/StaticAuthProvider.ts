@@ -1,7 +1,9 @@
 import { Enumerable } from '@d-fischer/shared-utils';
 import { rtfm } from '@twurple/common';
 import { AccessToken } from '../AccessToken';
-import { getTokenInfo } from '../helpers';
+import { FatalProviderError } from '../Errors/FatalProviderError';
+import { AbstractProvider } from './AbstractProvider';
+import type { LoadableCredentials } from './AbstractProvider';
 import type { AuthProvider, AuthProviderTokenType } from './AuthProvider';
 
 /**
@@ -12,7 +14,7 @@ import type { AuthProvider, AuthProviderTokenType } from './AuthProvider';
  * you will ever need.
  */
 @rtfm<StaticAuthProvider>('auth', 'StaticAuthProvider', 'clientId')
-export class StaticAuthProvider implements AuthProvider {
+export class StaticAuthProvider extends AbstractProvider implements AuthProvider {
 	@Enumerable(false) private readonly _clientId: string;
 	@Enumerable(false) private _accessToken?: AccessToken;
 	private _scopes?: string[];
@@ -38,6 +40,8 @@ export class StaticAuthProvider implements AuthProvider {
 		scopes?: string[],
 		tokenType: AuthProviderTokenType = 'user'
 	) {
+		super();
+
 		this._clientId = clientId || '';
 		this.tokenType = tokenType;
 		if (accessToken) {
@@ -53,6 +57,26 @@ export class StaticAuthProvider implements AuthProvider {
 		}
 	}
 
+	async saveCredentials(): Promise<void> {
+		throw new FatalProviderError('StaticAuthProvider cannot save credentials');
+	}
+
+	async loadCredentials(): Promise<LoadableCredentials> {
+		const accessToken = this._accessToken?.accessToken;
+
+		if (typeof accessToken !== 'string') {
+			throw new FatalProviderError('Child provider returned a null accessToken');
+		}
+		if (this._clientId === '') {
+			throw new FatalProviderError('Empty clientId given');
+		}
+
+		return {
+			clientId: this.clientId,
+			accessToken: accessToken
+		};
+	}
+
 	/**
 	 * Retrieves an access token.
 	 *
@@ -61,29 +85,16 @@ export class StaticAuthProvider implements AuthProvider {
 	 *
 	 * @param scopes The requested scopes.
 	 */
-	async getAccessToken(scopes?: string | string[]): Promise<AccessToken | null> {
-		if (scopes && scopes.length > 0) {
-			if (!this._scopes) {
-				if (!this._accessToken) {
-					throw new Error('Auth provider has not been initialized with a token yet and is requesting scopes');
-				}
-				const tokenInfo = await getTokenInfo(this._accessToken.accessToken, this._clientId);
-				this._scopes = tokenInfo.scopes;
-			}
-			if (typeof scopes === 'string') {
-				scopes = scopes.split(' ');
-			}
-			if (scopes.some(scope => !this._scopes!.includes(scope))) {
-				throw new Error(
-					`This token does not have the requested scopes (${scopes.join(', ')}) and can not be upgraded.
-If you need dynamically upgrading scopes, please implement the AuthProvider interface accordingly:
-
-\thttps://twurple.github.io/auth/reference/interfaces/AuthProvider.html`
-				);
-			}
-		}
-
-		return this._accessToken ?? null;
+	async getAccessToken(): Promise<AccessToken | null> {
+		const fullCreds = await this.fetch();
+		this._accessToken = new AccessToken({
+			access_token: fullCreds.accessToken,
+			refresh_token: '',
+			expires_in: fullCreds.expiresIn,
+			scope: fullCreds.scopes
+		});
+		this._scopes = fullCreds.scopes;
+		return this._accessToken;
 	}
 
 	/** @private */
