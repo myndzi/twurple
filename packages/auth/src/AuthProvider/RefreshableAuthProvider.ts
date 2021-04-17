@@ -5,6 +5,7 @@ import { FatalProviderError } from '../Errors/FatalProviderError';
 import { AbstractProvider } from './AbstractProvider';
 import type { RefreshableCredentials, LoadableCredentials } from './AbstractProvider';
 import type { AuthProvider, AuthProviderTokenType } from './AuthProvider';
+import type { AccessTokenData } from '../AccessToken';
 
 /**
  * Configuration for the {@RefreshableAuthProvider}.
@@ -93,7 +94,14 @@ export class RefreshableAuthProvider extends AbstractProvider implements AuthPro
 	}
 
 	async loadCredentials(): Promise<LoadableCredentials> {
-		const accessToken = (await this._childProvider.getAccessToken())?.accessToken;
+		// farming out the data fetching to the child...
+
+		const childToken = await this._childProvider.getAccessToken();
+		const accessToken = childToken?.accessToken;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/no-unsafe-member-access
+		const expiresIn = ((childToken as any)._data as AccessTokenData).expires_in;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/no-unsafe-member-access
+		const timestamp = (childToken as any)._obtainmentDate as Date;
 
 		if (typeof accessToken !== 'string') {
 			throw new FatalProviderError('Child provider returned a null accessToken');
@@ -101,10 +109,13 @@ export class RefreshableAuthProvider extends AbstractProvider implements AuthPro
 		return {
 			clientId: this._childProvider.clientId,
 			clientSecret: this._clientSecret,
-			accessToken: accessToken,
+			accessToken,
 			refreshToken: this._refreshToken,
 			expiryDate: this._initialExpiry ?? undefined,
-			scopes: this._childProvider.currentScopes
+			scopes: this._childProvider.currentScopes,
+			// we need these or we'll double-call getTokenInfo
+			expiresIn,
+			timestamp
 		};
 	}
 
@@ -166,7 +177,14 @@ export class RefreshableAuthProvider extends AbstractProvider implements AuthPro
 		// }
 
 		// // need to check again for scopes after refreshing, in case a refresh token was passed without an access token
-		return this._childProvider.getAccessToken(scopes);
+		return new AccessToken({
+			access_token: fullCreds.accessToken,
+			// the constructor guarantees we have a value here, though the type doesn't...
+			refresh_token: (fullCreds as RefreshableCredentials).refreshToken,
+			expires_in: fullCreds.expiresIn,
+			scope: fullCreds.scopes
+		});
+
 		// return new AccessToken(
 		// 	{
 		// 		access_token: fullCreds.accessToken,

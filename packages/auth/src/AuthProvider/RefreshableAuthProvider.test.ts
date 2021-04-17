@@ -15,12 +15,12 @@ const getTokenInfo = mocked(gTI);
 describe('RefreshableAuthProvider', () => {
 	// use consistent dates so that snapshot testing is consistent
 	beforeEach(() => {
+		refreshUserToken.mockReset();
+		getTokenInfo.mockReset();
 		MockDate.set(new Date('2021-04-15T00:00:00.000Z'));
 	});
 	afterEach(() => {
 		MockDate.reset();
-		refreshUserToken.mockReset();
-		getTokenInfo.mockReset();
 	});
 	it('returns the expected values, does not attempt to refresh, does hydrate', async () => {
 		// since we can't instantiate auth providers with complete data,
@@ -42,6 +42,7 @@ describe('RefreshableAuthProvider', () => {
 		future.setDate(future.getDate() + 1);
 
 		const sap = new StaticAuthProvider('clientId', 'access:initial', ['scope1', 'scope2'], 'user');
+
 		const rap = new RefreshableAuthProvider(sap, {
 			clientSecret: 'clientSecret',
 			refreshToken: 'refresh:initial',
@@ -52,32 +53,44 @@ describe('RefreshableAuthProvider', () => {
 		expect(getTokenInfo).toHaveBeenCalledTimes(1);
 		expect(refreshUserToken).toHaveBeenCalledTimes(0);
 		expect(unwrap(accessToken)).toMatchInlineSnapshot(`
-		Array [
-		  Object {
-		    "access_token": "access:initial",
-		    "expires_in": 1234,
-		    "refresh_token": "refresh:initial",
-		    "scope": Array [
-		      "token_info_scopes",
-		    ],
-		  },
-		  2021-04-15T00:00:00.000Z,
-		]
-	`);
+			Array [
+			  Object {
+			    "access_token": "access:initial",
+			    "expires_in": 1234,
+			    "refresh_token": "refresh:initial",
+			    "scope": Array [
+			      "token_info_scopes",
+			    ],
+			  },
+			  2021-04-15T00:00:00.000Z,
+			]
+		`);
 	});
 
 	it('refreshes and returns the new values', async () => {
-		getTokenInfo.mockReturnValue(
-			Promise.resolve(
-				new TokenInfo({
-					client_id: 'token_info_client_id',
-					login: 'token_info_login',
-					scopes: ['token_info_scopes'],
-					user_id: 'token_info_user_id',
-					expires_in: -86401
-				})
+		getTokenInfo
+			.mockReturnValueOnce(
+				Promise.resolve(
+					new TokenInfo({
+						client_id: 'token_info_client_id',
+						login: 'token_info_login',
+						scopes: ['token_info_scopes'],
+						user_id: 'token_info_user_id',
+						expires_in: 86401 // for the static provider
+					})
+				)
 			)
-		);
+			.mockReturnValueOnce(
+				Promise.resolve(
+					new TokenInfo({
+						client_id: 'token_info_client_id',
+						login: 'token_info_login',
+						scopes: ['token_info_scopes'],
+						user_id: 'token_info_user_id',
+						expires_in: -86401 // for the refreshable provider
+					})
+				)
+			);
 		refreshUserToken.mockReturnValue(
 			Promise.resolve(
 				new AccessToken({
@@ -93,6 +106,7 @@ describe('RefreshableAuthProvider', () => {
 		past.setDate(past.getDate() - 1);
 
 		const sap = new StaticAuthProvider('clientId', 'access:initial', ['scope1', 'scope2'], 'user');
+		void (await sap.getAccessToken());
 		const rap = new RefreshableAuthProvider(sap, {
 			clientSecret: 'clientSecret',
 			refreshToken: 'refresh:initial',
