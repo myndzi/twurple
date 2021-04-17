@@ -7,26 +7,26 @@ import { RefreshableAuthProvider } from './RefreshableAuthProvider';
 
 import { refreshUserToken as rUT, getTokenInfo as gTI } from '../helpers';
 import { TokenInfo } from '../TokenInfo';
+import { unwrap } from '../testhelpers';
 jest.mock('../helpers');
 const refreshUserToken = mocked(rUT);
 const getTokenInfo = mocked(gTI);
-
-type AccessTokenArgs = ConstructorParameters<typeof AccessToken>;
-const unwrap = (at: AccessToken | null): AccessTokenArgs | null => {
-	if (!at) {
-		return null;
-	}
-	// the AccessToken class hides its data, so we have to cheat to get at it. the private data is not
-	// enumerable, so snapshot tests won't be useful without unwrapping it
-	// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-explicit-any
-	return [(at as any)._data, (at as any)._obtainmentDate];
-};
 
 describe('RefreshableAuthProvider', () => {
 	// use consistent dates so that snapshot testing is consistent
 	beforeEach(() => {
 		MockDate.set(new Date('2021-04-15T00:00:00.000Z'));
+	});
+	afterEach(() => {
+		MockDate.reset();
 		refreshUserToken.mockReset();
+		getTokenInfo.mockReset();
+	});
+	it('returns the expected values, does not attempt to refresh, does hydrate', async () => {
+		// since we can't instantiate auth providers with complete data,
+		// authorization is always hydrated -- at the very least, to fill
+		// in "expires_in". This could be cleaned up in the future, but
+		// for now, mock it out...
 		getTokenInfo.mockReturnValue(
 			Promise.resolve(
 				new TokenInfo({
@@ -38,11 +38,6 @@ describe('RefreshableAuthProvider', () => {
 				})
 			)
 		);
-	});
-	afterEach(() => {
-		MockDate.reset();
-	});
-	it('returns the expected values, does not attempt to refresh', async () => {
 		const future = new Date();
 		future.setDate(future.getDate() + 1);
 
@@ -54,15 +49,16 @@ describe('RefreshableAuthProvider', () => {
 		});
 
 		const accessToken = await rap.getAccessToken();
+		expect(getTokenInfo).toHaveBeenCalledTimes(1);
 		expect(refreshUserToken).toHaveBeenCalledTimes(0);
 		expect(unwrap(accessToken)).toMatchInlineSnapshot(`
 		Array [
 		  Object {
 		    "access_token": "access:initial",
-		    "refresh_token": "",
+		    "expires_in": 1234,
+		    "refresh_token": "refresh:initial",
 		    "scope": Array [
-		      "scope1",
-		      "scope2",
+		      "token_info_scopes",
 		    ],
 		  },
 		  2021-04-15T00:00:00.000Z,
@@ -71,6 +67,17 @@ describe('RefreshableAuthProvider', () => {
 	});
 
 	it('refreshes and returns the new values', async () => {
+		getTokenInfo.mockReturnValue(
+			Promise.resolve(
+				new TokenInfo({
+					client_id: 'token_info_client_id',
+					login: 'token_info_login',
+					scopes: ['token_info_scopes'],
+					user_id: 'token_info_user_id',
+					expires_in: -86401
+				})
+			)
+		);
 		refreshUserToken.mockReturnValue(
 			Promise.resolve(
 				new AccessToken({
@@ -93,6 +100,7 @@ describe('RefreshableAuthProvider', () => {
 		});
 
 		const accessToken = await rap.getAccessToken();
+		expect(getTokenInfo).toHaveBeenCalledTimes(1);
 		expect(refreshUserToken).toHaveBeenCalledTimes(1);
 		expect(unwrap(accessToken)).toMatchInlineSnapshot(`
 		Array [
@@ -140,8 +148,19 @@ describe('RefreshableAuthProvider', () => {
 		past.setDate(past.getDate() - 1);
 		future.setDate(past.getDate() + 1);
 
-		// initially, we shouldn't refresh because the token "hasn't expired yet"
+		// we won't call refresh, but we will hydrate on instantiation
 		MockDate.set(past);
+		getTokenInfo.mockReturnValue(
+			Promise.resolve(
+				new TokenInfo({
+					client_id: 'token_info_client_id',
+					login: 'token_info_login',
+					scopes: ['token_info_scopes'],
+					user_id: 'token_info_user_id',
+					expires_in: 1
+				})
+			)
+		);
 		const sap = new StaticAuthProvider('clientId', 'access:initial', ['scope1', 'scope2'], 'user');
 		const rap = new RefreshableAuthProvider(sap, {
 			clientSecret: 'clientSecret',
@@ -152,10 +171,10 @@ describe('RefreshableAuthProvider', () => {
 		Array [
 		  Object {
 		    "access_token": "access:initial",
-		    "refresh_token": "",
+		    "expires_in": 1,
+		    "refresh_token": "refresh:initial",
 		    "scope": Array [
-		      "scope1",
-		      "scope2",
+		      "token_info_scopes",
 		    ],
 		  },
 		  2021-04-14T00:00:00.000Z,
@@ -196,6 +215,7 @@ describe('RefreshableAuthProvider', () => {
 		]
 	`);
 		expect(results.map(at => at?.accessToken)).toEqual(['access:success', 'access:success']);
+		expect(getTokenInfo).toHaveBeenCalledTimes(1);
 		expect(refreshUserToken).toHaveBeenCalledTimes(1);
 	});
 });

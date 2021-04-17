@@ -3,7 +3,7 @@ import { rtfm } from '@twurple/common';
 import { AccessToken } from '../AccessToken';
 import { FatalProviderError } from '../Errors/FatalProviderError';
 import { AbstractProvider } from './AbstractProvider';
-import type { Credentials, PartialCredentials } from './AbstractProvider';
+import type { RefreshableCredentials, LoadableCredentials } from './AbstractProvider';
 import type { AuthProvider, AuthProviderTokenType } from './AuthProvider';
 
 /**
@@ -44,6 +44,7 @@ export class RefreshableAuthProvider extends AbstractProvider implements AuthPro
 	private readonly _childProvider: AuthProvider;
 	private _initialExpiry?: Date | null;
 	private readonly _onRefresh?: (token: AccessToken) => void;
+
 	@Enumerable(false) private _lastKnownAccessToken?: AccessToken;
 
 	/**
@@ -72,7 +73,7 @@ export class RefreshableAuthProvider extends AbstractProvider implements AuthPro
 		expiresIn: expires_in,
 		scopes: scope,
 		timestamp: obtainmentDate
-	}: Credentials): Promise<void> {
+	}: RefreshableCredentials): Promise<void> {
 		const tokenData = new AccessToken(
 			{
 				access_token,
@@ -91,7 +92,7 @@ export class RefreshableAuthProvider extends AbstractProvider implements AuthPro
 		}
 	}
 
-	async loadCredentials(): Promise<PartialCredentials> {
+	async loadCredentials(): Promise<LoadableCredentials> {
 		const accessToken = (await this._childProvider.getAccessToken())?.accessToken;
 
 		if (typeof accessToken !== 'string') {

@@ -1,27 +1,51 @@
-import type { Logger } from '@d-fischer/logger';
-import type { AccessTokenData } from '../AccessToken';
 import { FatalProviderError } from '../Errors/FatalProviderError';
 import { getTokenInfo, refreshUserToken } from '../helpers';
+import type { Logger } from '@d-fischer/logger';
+import type { AccessTokenData } from '../AccessToken';
+import type { TokenInfoData } from '../TokenInfo';
 
 /**
- * Credentials holds all data relevant to making API calls or refreshing access tokens
+ * Credentials holds all data relevant to making API calls or refreshing access tokens.
+ *
+ * This type is internal-use only: it defines the shape of the internal state. The various
+ * `FooCredentials` types define the interface to external collers
  */
-export interface Credentials {
+interface Credentials {
 	clientId: string;
-	clientSecret: string;
 	accessToken: string;
-	refreshToken: string;
+	clientSecret?: string;
+	refreshToken?: string;
 	scopes: string[];
 	expiryDate: Date;
 
 	// to be able to instantiate an AccessToken, we must store these values too
-	expiresIn?: number;
-	timestamp?: Date;
+	expiresIn: number;
+	timestamp: Date;
 }
 
-type PartialCredentialsAllowed = 'scopes' | 'expiresIn' | 'timestamp' | 'expiryDate';
-export type PartialCredentials = Partial<Pick<Credentials, PartialCredentialsAllowed>> &
-	Omit<Credentials, PartialCredentialsAllowed>;
+type RequiredFields = 'clientId' | 'accessToken';
+type StaticFields = RequiredFields | 'scopes' | 'expiryDate' | 'expiresIn' | 'timestamp';
+type RefreshableFields = StaticFields | 'clientSecret' | 'refreshToken';
+
+type WithRequired<T, F extends keyof T> = Required<Pick<T, F>> & Partial<Omit<T, F>>;
+
+/**
+ * LoadableCredentials defines the bare minimum fields required to perform work.
+ * Omitting certain fields may result in reduced functionality; for example, omitting `clientSecret`
+ * will result in being unable to refresh tokens, and calls to `.idempotentRefresh()` will fail
+ */
+export type LoadableCredentials = WithRequired<Credentials, RequiredFields>;
+
+/**
+ * RefreshableCredentials represents the bare minimum set of data to be able to make API calls
+ * **and** refresh the credentials. Any omitted fields can be supplied by the Twitch API.
+ */
+export type RefreshableCredentials = WithRequired<Credentials, RefreshableFields>;
+
+/**
+ * StaticCredentials represents
+ */
+export type StaticCredentials = WithRequired<Credentials, StaticFields>;
 
 /**
  * ProviderConfig contains options that govern refresh behavior of an AbstractProvider
@@ -62,7 +86,7 @@ export interface ProviderConfig {
 export abstract class AbstractProvider {
 	protected logger?: Logger;
 	protected credentials: Promise<Credentials>;
-	protected readonly refreshMap: Map<string, Promise<Credentials> | Credentials>;
+	protected readonly refreshMap: Map<string, Promise<RefreshableCredentials> | RefreshableCredentials>;
 	protected readonly refreshPadding: number;
 	protected readonly expiryAge: number;
 	private nextSave: Date | null;
@@ -77,7 +101,7 @@ export abstract class AbstractProvider {
 		// wrapping the call to this.initCredentials in a promise...
 		this.credentials = new Promise(resolve => setImmediate(resolve)).then(async () => this.initCredentials());
 
-		this.refreshMap = new Map<string, Credentials>();
+		this.refreshMap = new Map<string, RefreshableCredentials>();
 		this.nextSave = null;
 
 		// prune the refreshMap every 5 minutes
@@ -88,7 +112,7 @@ export abstract class AbstractProvider {
 	 * Returns a promise for the current API credentials. Automatically
 	 * refreshes if needed.
 	 */
-	async fetch(): Promise<Credentials> {
+	async fetch(): Promise<StaticCredentials> {
 		const now = new Date().getTime();
 
 		const fullCreds = await this.credentials;
@@ -97,7 +121,11 @@ export abstract class AbstractProvider {
 		const expiresInMs = expiryDate.getTime() - now - this.refreshPadding;
 		if (expiresInMs <= 0) {
 			// automatically refresh if we're within `refreshPadding` milliseconds of expiring
-			return this.idempotentRefresh(accessToken);
+			if (fullCreds.clientSecret && fullCreds.refreshToken) {
+				return this.idempotentRefresh(accessToken);
+			}
+			// the credentials have expired and there's no refresh info, raise a reasonable error
+			throw new FatalProviderError('Static credentials have expired');
 		}
 
 		// otherwise, return what we already have...
@@ -105,7 +133,7 @@ export abstract class AbstractProvider {
 		// but first, attempt to save when updated credentials failed to save.
 		// this step
 		if (this.nextSave !== null && this.nextSave.getTime() < now) {
-			await this.trySaveCredentials(fullCreds);
+			await this.trySaveCredentials(fullCreds as RefreshableCredentials);
 		}
 
 		return fullCreds;
@@ -117,7 +145,7 @@ export abstract class AbstractProvider {
 	 *
 	 * @param oldAccessToken The previous access token being refreshed
 	 */
-	async idempotentRefresh(oldAccessToken: string): Promise<Credentials> {
+	async idempotentRefresh(oldAccessToken: string): Promise<RefreshableCredentials> {
 		// if we have a record of a previous refresh request with this token:
 		// return whatever we returned last time. we could do this iteratively, but
 		// it doesn't seem worth the complexity. if the credentials returned here
@@ -134,6 +162,14 @@ export abstract class AbstractProvider {
 		// the same promises.
 		const refreshPromise = this.credentials
 			.then(async fullCreds => {
+				// we check for this in `.fetch()`, but a user could call this method explicitly,
+				// so we need to check here too
+				if (!fullCreds.clientSecret) {
+					throw new FatalProviderError('No clientSecret was supplied, cannot refresh credentials');
+				}
+				if (!fullCreds.refreshToken) {
+					throw new FatalProviderError('No refreshToken was supplied, cannot refresh credentials');
+				}
 				// if the accessToken matches the current credentials, they should be
 				// refreshed. if it doesn't, we don't know what to do -- they could
 				// be bogus, really old, or we could have restarted and lost some
@@ -168,18 +204,29 @@ export abstract class AbstractProvider {
 					throw new FatalProviderError('refreshUserToken did not return an expiryDate');
 				}
 
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-explicit-any
+				const expiresIn = ((newAccessToken as any)._data as AccessTokenData).expires_in;
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-explicit-any
+				const timestamp = (newAccessToken as any)._obtainmentDate as Date;
+
+				if (typeof expiresIn !== 'number') {
+					// more validation to ensure we can rely on our types...
+					throw new FatalProviderError('Twitch API did not return `expires_in`');
+				}
+				if (!(timestamp instanceof Date)) {
+					throw new FatalProviderError('Internal error: no obtainmentDate from AccessToken');
+				}
+
 				// map the getter-based interface to plain data
-				const newCreds: Credentials = {
+				const newCreds: RefreshableCredentials = {
 					clientId: fullCreds.clientId,
 					clientSecret: fullCreds.clientSecret,
 					accessToken: newAccessToken.accessToken,
 					expiryDate: newAccessToken.expiryDate,
 					refreshToken: newAccessToken.refreshToken,
 					scopes: newAccessToken.scope,
-					// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-explicit-any
-					expiresIn: ((newAccessToken as any)._data as AccessTokenData).expires_in,
-					// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-explicit-any
-					timestamp: (newAccessToken as any)._obtainmentDate as Date
+					expiresIn,
+					timestamp
 				};
 
 				// to avoid having to loop over and resolve all the promises, it's more convenient
@@ -221,16 +268,43 @@ export abstract class AbstractProvider {
 		return refreshPromise;
 	}
 
-	abstract saveCredentials(creds: Credentials): Promise<void>;
-	abstract loadCredentials(): Promise<PartialCredentials>;
+	abstract saveCredentials(creds: RefreshableCredentials): Promise<void>;
+	abstract loadCredentials(): Promise<LoadableCredentials>;
 
 	private async initCredentials(): Promise<Credentials> {
-		const fullCreds = await this.loadCredentials();
-		if (!fullCreds.scopes) {
-			// the source credentials may not have stored the scopes. hydrate from the API
-			fullCreds.scopes = (await getTokenInfo(fullCreds.accessToken, fullCreds.clientId)).scopes;
+		const creds = await this.loadCredentials();
+		let hydrated = false;
+		if (!creds.scopes || !creds.expiryDate || !creds.expiresIn || !creds.timestamp) {
+			// the source credentials may not have some info, but we can retrieve it from the API
+			const tokenInfo = await getTokenInfo(creds.accessToken, creds.clientId);
+			Object.assign(creds, {
+				scopes: tokenInfo.scopes,
+				expiryDate: tokenInfo.expiryDate,
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-explicit-any
+				expiresIn: ((tokenInfo as any)._data as TokenInfoData).expires_in,
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access,@typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-explicit-any
+				timestamp: (tokenInfo as any)._obtainmentDate as Date
+			});
+			hydrated = true;
 		}
-		return fullCreds as Credentials;
+
+		// ensure our type safety holds...
+		if (
+			!Array.isArray(creds.scopes) ||
+			!(creds.expiryDate instanceof Date) ||
+			!(creds.timestamp instanceof Date) ||
+			typeof creds.expiresIn !== 'number'
+		) {
+			throw new FatalProviderError('Failed to hydrate missing data from the Twitch API');
+		}
+
+		if (hydrated && creds.refreshToken && creds.clientSecret) {
+			// Since we may have hydrated some info from the API, update the provider
+			// with the full information. Only valid for refreshable credentials.
+			void this.trySaveCredentials(creds as RefreshableCredentials);
+		}
+
+		return creds as Credentials;
 	}
 
 	/**
@@ -239,7 +313,7 @@ export abstract class AbstractProvider {
 	 *
 	 * @param creds full credentials to save
 	 */
-	private async trySaveCredentials(creds: Credentials): Promise<void> {
+	private async trySaveCredentials(creds: RefreshableCredentials): Promise<void> {
 		// if we are unable to save these new credentials, we are in a pickle. the old
 		// accessToken may be invalid now, but the old refreshToken can be valid for
 		// longer. in order to keep the application functioning, we'll return the new
