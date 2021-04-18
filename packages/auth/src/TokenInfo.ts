@@ -64,4 +64,19 @@ export class TokenInfo {
 
 		return new Date(this._obtainmentDate.getTime() + this._data.expires_in * 1000);
 	}
+
+	/**
+	 * The number of seconds, as of the API call that fetched the token, in which it
+	 * will become expired
+	 */
+	get expiresIn(): number | null {
+		return this._data.expires_in ?? null;
+	}
+
+	/**
+	 * The date the token was acquired
+	 */
+	get obtainmentDate(): Date {
+		return this._obtainmentDate;
+	}
 }
