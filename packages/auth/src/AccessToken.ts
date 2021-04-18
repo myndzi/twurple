@@ -63,4 +63,19 @@ export class AccessToken {
 	get scope(): string[] {
 		return this._data.scope ?? [];
 	}
+
+	/**
+	 * The number of seconds, as of the API call that fetched the token, in which it
+	 * will become expired
+	 */
+	get expiresIn(): number | null {
+		return this._data.expires_in ?? null;
+	}
+
+	/**
+	 * The date the token was acquired
+	 */
+	get obtainmentDate(): Date {
+		return this._obtainmentDate;
+	}
 }
